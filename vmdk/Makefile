@@ -13,7 +13,7 @@
 # specific language governing permissions and limitations under the License.
 # ================================================================================
 
-SRC := flat.c sparse.c mkdisk.c
+SRC := flat.c sparse.c mkdisk.c zbs.c
 OUTPUTDIR := ../build/vmdk
 EXE := $(OUTPUTDIR)/vmdk-convert
 
@@ -21,7 +21,7 @@ PREFIX ?= /usr
 
 CC := gcc
 CFLAGS := -W -Wall -O2 -g $(CFLAGS)
-LDFLAGS := -g -lz $(LDFLAGS)
+LDFLAGS := -g -lz -lzbs $(LDFLAGS)
 
 OBJS := $(addprefix $(OUTPUTDIR)/, $(SRC:%.c=%.o))
 
@@ -40,7 +40,9 @@ $(OUTPUTDIR):
 
 $(addprefix $(OUTPUTDIR)/,mkdisk.o flat.o sparse.o): diskinfo.h
 
-$(addprefix $(OUTPUTDIR)/,sparse.o): vmware_vmdk.h
+$(addprefix $(OUTPUTDIR)/,sparse.o): vmware_vmdk.h block.h
+
+$(addprefix $(OUTPUTDIR)/,zbs.o): block.h
 
 check:
 	sparse -Wsparse-all -I/usr/include/x86_64-linux-gnu $(SRC)

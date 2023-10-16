@@ -52,7 +52,7 @@ copyData(DiskInfo *dst,
 		}
 		if (dst->vmt->pwrite(dst, buf, readLen, dstOffset) != (ssize_t)readLen) {
 			return -1;
-		}		
+		}
 		srcOffset += readLen;
 		dstOffset += readLen;
 	}
@@ -154,10 +154,10 @@ main(int argc,
 	} else {
 		src = argv[optind++];
 	}
-	di = Sparse_Open(src);
-	if (di == NULL) {
-		di = Flat_Open(src);
-	}
+	// di = Sparse_Open(src);
+	// if (di == NULL) {
+	di = Flat_Open(src);
+	// }
 	if (di == NULL) {
 		fprintf(stderr, "Cannot open source disk %s: %s\n", src, strerror(errno));
 	} else {

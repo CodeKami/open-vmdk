@@ -104,7 +104,7 @@ FlatNextData(DiskInfo *self,
 	*pos = dataOff;
 	*end = holeOff;
 	return 0;
-	
+
 }
 
 static DiskInfoVMT flatDiskInfoVMT = {
@@ -167,4 +167,3 @@ errClose:
 	close(fd);
 	return NULL;
 }
-
