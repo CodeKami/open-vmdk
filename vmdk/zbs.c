@@ -94,7 +94,13 @@ ssize_t zbs_write_volume(zbs* z, void* buf, size_t n_bytes) {
 }
 
 ssize_t zbs_get_size(zbs* z) {
-    return z->seek;
+    zbs_volume_t disk;
+    int ret = zbs_volume_get_by_id(z->zbs_client, z->zbs_volume_id, &disk);
+    if (ret != 0) {
+        printf("get disk info error.\n");
+        return 0;
+    }
+    return disk.size;
 }
 
 int zbs_close(zbs* z) {

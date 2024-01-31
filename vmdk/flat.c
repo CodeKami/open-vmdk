@@ -20,11 +20,13 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 
+#include "block.h"
 #include "diskinfo.h"
+#include "parse_cmd.h"
 
 typedef struct {
     DiskInfo hdr;
-    int fd;
+    block *b;
     uint64_t capacity;
 } FlatDiskInfo;
 
@@ -40,7 +42,7 @@ static off_t FlatGetCapacity(DiskInfo *self) {
 
 static ssize_t FlatPread(DiskInfo *self, void *buf, size_t len, off_t pos) {
     FlatDiskInfo *fdi = getFDI(self);
-    return pread(fdi->fd, buf, len, pos);
+    return fdi->b->pread(fdi->b->opaque, buf, len, pos);
 }
 
 static ssize_t FlatPwrite(DiskInfo *self, const void *buf, size_t len, off_t pos) {
@@ -49,20 +51,21 @@ static ssize_t FlatPwrite(DiskInfo *self, const void *buf, size_t len, off_t pos
     /*
      * Should we do some zero detection here to generate sparse file?
      */
-    return pwrite(fdi->fd, buf, len, pos);
+    return fdi->b->pwrite(fdi->b->opaque, buf, len, pos);
 }
 
 static int FlatClose(DiskInfo *self) {
     FlatDiskInfo *fdi = getFDI(self);
-    int fd = fdi->fd;
+    int ret = fdi->b->close(fdi->b->opaque);
+    free(fdi->b);
 
     free(fdi);
-    return close(fd);
+    return ret;
 }
 
 static int FlatNextData(DiskInfo *self, off_t *pos, off_t *end) {
     FlatDiskInfo *fdi = getFDI(self);
-    off_t dataOff = lseek(fdi->fd, *end, SEEK_DATA);
+    off_t dataOff = fdi->b->seek(fdi->b->opaque, *end, SEEK_DATA);
     off_t holeOff;
 
     if (dataOff == -1) {
@@ -76,7 +79,7 @@ static int FlatNextData(DiskInfo *self, off_t *pos, off_t *end) {
             return -1;
         }
     } else {
-        holeOff = lseek(fdi->fd, dataOff, SEEK_HOLE);
+        holeOff = fdi->b->seek(fdi->b->opaque, dataOff, SEEK_HOLE);
         if (holeOff == -1) {
             holeOff = fdi->capacity;
         }
@@ -94,48 +97,43 @@ static DiskInfoVMT flatDiskInfoVMT = {.getCapacity = FlatGetCapacity,
                                       .abort = FlatClose};
 
 DiskInfo *Flat_Open(const char *fileName) {
-    int fd = open(fileName, O_RDONLY);
+    block *b = new_zbs_block(args.src_ip, args.src_volume_uuid, O_RDONLY);
     struct stat stb;
     FlatDiskInfo *fdi;
 
-    if (fd == -1) {
+    if (b == NULL) {
         return NULL;
     }
-    if (fstat(fd, &stb)) {
-        goto errClose;
-    }
+
     fdi = malloc(sizeof *fdi);
     if (!fdi) {
         goto errClose;
     }
     fdi->hdr.vmt = &flatDiskInfoVMT;
-    fdi->fd = fd;
-    fdi->capacity = stb.st_size;
+    fdi->b = b;
+    fdi->capacity = b->get_size(b->opaque);
     return &fdi->hdr;
 errClose:
-    close(fd);
+    b->close(b->opaque);
     return NULL;
 }
 
 DiskInfo *Flat_Create(const char *fileName, off_t capacity) {
-    int fd = open(fileName, O_RDWR | O_CREAT | O_TRUNC, 0666);
+    block *b = new_zbs_block(args.dest_ip, args.dest_volume_uuid, 0);
     FlatDiskInfo *fdi;
 
-    if (fd == -1) {
+    if (b == NULL) {
         return NULL;
-    }
-    if (ftruncate(fd, capacity)) {
-        goto errClose;
     }
     fdi = malloc(sizeof *fdi);
     if (!fdi) {
         goto errClose;
     }
     fdi->hdr.vmt = &flatDiskInfoVMT;
-    fdi->fd = fd;
+    fdi->b = b;
     fdi->capacity = capacity;
     return &fdi->hdr;
 errClose:
-    close(fd);
+    b->close(b->opaque);
     return NULL;
 }

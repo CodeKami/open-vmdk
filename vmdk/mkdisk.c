@@ -84,10 +84,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    di = Sparse_Open(args.src_file_path);
-    if (di == NULL) {
-        di = Flat_Open(args.src_file_path);
-    }
+    di = Flat_Open(args.src_file_path);
     if (di == NULL) {
         fprintf(stderr, "Cannot open source disk %s: %s\n", args.src_file_path, strerror(errno));
     } else {
@@ -107,10 +104,7 @@ int main(int argc, char *argv[]) {
 
             capacity = di->vmt->getCapacity(di);
 
-            if (strcmp(&(args.dest_file_path[strlen(args.dest_file_path) - 5]), ".vmdk") == 0)
-                tgt = StreamOptimized_Create(args.dest_file_path, capacity);
-            else
-                tgt = Flat_Create(args.dest_file_path, capacity);
+            tgt = StreamOptimized_Create(args.dest_file_path, capacity);
 
             if (tgt == NULL) {
                 fprintf(stderr, "Cannot open target disk %s: %s\n", args.dest_file_path, strerror(errno));

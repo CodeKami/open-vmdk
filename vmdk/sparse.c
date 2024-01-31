@@ -22,7 +22,9 @@
 #include <string.h>
 #include <zlib.h>
 
+#include "block.h"
 #include "diskinfo.h"
+#include "parse_cmd.h"
 #include "vmware_vmdk.h"
 
 #define CEILING(x, y) (((x) + (y)-1) / (y))
@@ -156,7 +158,7 @@ static char *makeDiskDescriptorFile(const char *fileName, uint64_t capacity, uin
         cylinders = CEILING(capacity, 255 * 63);
     }
     if (asprintf(&ret, ddfTemplate, cid, (long long int)capacity, fileName, (uint32_t)mrand48(), (uint32_t)mrand48(),
-                 (uint32_t)mrand48(), cid, cylinders, "2147483647") == -1) {
+                 (uint32_t)mrand48(), cid, cylinders, args.tools_version) == -1) {
         return NULL;
     }
     return ret;
@@ -189,7 +191,7 @@ typedef struct {
     ZLibBuffer zlibBuffer;
     size_t zlibBufferSize;
     z_stream zstream;
-    int fd;
+    block *b;
     char *fileName;
     uint8_t *grainBuffer;
     uint64_t grainBufferNr;
@@ -256,8 +258,8 @@ static SectorType prefillGD(SparseGTInfo *gtInfo, SectorType gtBase) {
     return gtBase;
 }
 
-static bool safeWrite(int fd, const void *buf, size_t len) {
-    ssize_t written = write(fd, buf, len);
+static bool safeWrite(block *b, const void *buf, size_t len) {
+    ssize_t written = b->write(b->opaque, buf, len);
 
     if (written == -1) {
         fprintf(stderr, "Write failed: %s\n", strerror(errno));
@@ -270,8 +272,8 @@ static bool safeWrite(int fd, const void *buf, size_t len) {
     return true;
 }
 
-static bool safePread(int fd, void *buf, size_t len, off_t pos) {
-    ssize_t rd = pread(fd, buf, len, pos);
+static bool safePread(block *b, void *buf, size_t len, off_t pos) {
+    ssize_t rd = b->pread(b->opaque, buf, len, pos);
 
     if (rd == -1) {
         fprintf(stderr, "Read failed: %s\n", strerror(errno));
@@ -373,7 +375,7 @@ static int flushGrain(StreamOptimizedDiskInfo *sodi) {
             memset(sodi->writer.zstream.next_out, 0, rem);
             dataLen += rem;
         }
-        if (!safeWrite(sodi->writer.fd, grainHdr, dataLen)) {
+        if (!safeWrite(sodi->writer.b, grainHdr, dataLen)) {
             return -1;
         }
         sodi->writer.curSP += dataLen / VMDK_SECTOR_SIZE;
@@ -446,7 +448,7 @@ static bool writeSpecial(SparseVmdkWriter *writer, uint32_t marker, SectorType l
     memset(writer->zlibBuffer.data, 0, VMDK_SECTOR_SIZE);
     specialHdr->lba = __cpu_to_le64(length);
     specialHdr->type = __cpu_to_le32(marker);
-    return safeWrite(writer->fd, specialHdr, VMDK_SECTOR_SIZE);
+    return safeWrite(writer->b, specialHdr, VMDK_SECTOR_SIZE);
 }
 
 static bool writeEOS(SparseVmdkWriter *writer) {
@@ -456,7 +458,8 @@ static bool writeEOS(SparseVmdkWriter *writer) {
 static int StreamOptimizedFinalize(StreamOptimizedDiskInfo *sodi) {
     int ret;
 
-    ret = close(sodi->writer.fd);
+    ret = sodi->writer.b->close(sodi->writer.b->opaque);
+    free(sodi->writer.b);
     deflateEnd(&sodi->writer.zstream);
     free(sodi->writer.gtInfo.gd);
     free(sodi->writer.grainBuffer);
@@ -482,10 +485,10 @@ static int StreamOptimizedClose(DiskInfo *self) {
         goto failAll;
     }
     writeEOS(&sodi->writer);
-    if (lseek(sodi->writer.fd, sodi->writer.gdOffset * VMDK_SECTOR_SIZE, SEEK_SET) == -1) {
+    if (sodi->writer.b->seek(sodi->writer.b->opaque, sodi->writer.gdOffset * VMDK_SECTOR_SIZE, SEEK_SET) == -1) {
         goto failAll;
     }
-    if (!safeWrite(sodi->writer.fd, sodi->writer.gtInfo.gd,
+    if (!safeWrite(sodi->writer.b, sodi->writer.gtInfo.gd,
                    (sodi->writer.gtInfo.GDsectors + sodi->writer.gtInfo.GTsectors * sodi->writer.gtInfo.GTs) *
                        VMDK_SECTOR_SIZE)) {
         goto failAll;
@@ -498,8 +501,8 @@ static int StreamOptimizedClose(DiskInfo *self) {
          */
     } while (cid == 0xFFFFFFFFU || cid == 0xFFFFFFFEU);
     descFile = makeDiskDescriptorFile(sodi->writer.fileName, sodi->diskHdr.capacity, cid);
-    if (pwrite(sodi->writer.fd, descFile, strlen(descFile), sodi->diskHdr.descriptorOffset * VMDK_SECTOR_SIZE) !=
-        (ssize_t)strlen(descFile)) {
+    if (sodi->writer.b->pwrite(sodi->writer.b->opaque, descFile, strlen(descFile),
+                               sodi->diskHdr.descriptorOffset * VMDK_SECTOR_SIZE) != (ssize_t)strlen(descFile)) {
         free(descFile);
         goto failAll;
     }
@@ -511,19 +514,19 @@ static int StreamOptimizedClose(DiskInfo *self) {
      * rewrite header with proper VMDK signature.
      */
     setSparseExtentHeader(&onDisk, &sodi->diskHdr, true);
-    if (pwrite(sodi->writer.fd, &onDisk, sizeof onDisk, 0) != sizeof onDisk) {
+    if (sodi->writer.b->pwrite(sodi->writer.b->opaque, &onDisk, sizeof onDisk, 0) != sizeof onDisk) {
         goto failAll;
     }
-    if (fsync(sodi->writer.fd) != 0) {
-        goto failAll;
-    }
+    // if (fsync(sodi->writer.fd) != 0) {
+    // 	goto failAll;
+    // }
     setSparseExtentHeader(&onDisk, &sodi->diskHdr, false);
-    if (pwrite(sodi->writer.fd, &onDisk, sizeof onDisk, 0) != sizeof onDisk) {
+    if (sodi->writer.b->pwrite(sodi->writer.b->opaque, &onDisk, sizeof onDisk, 0) != sizeof onDisk) {
         goto failAll;
     }
-    if (fsync(sodi->writer.fd) != 0) {
-        goto failAll;
-    }
+    // if (fsync(sodi->writer.fd) != 0) {
+    // 	goto failAll;
+    // }
     return StreamOptimizedFinalize(sodi);
 
 failAll:
@@ -559,8 +562,8 @@ DiskInfo *StreamOptimized_Create(const char *fileName, off_t capacity) {
     if (!getGDGT(&sodi->writer.gtInfo, &sodi->diskHdr)) {
         goto failFileName;
     }
-    sodi->writer.fd = open(fileName, O_RDWR | O_CREAT | O_TRUNC, 0666);
-    if (sodi->writer.fd == -1) {
+    sodi->writer.b = new_zbs_block(args.dest_ip, args.dest_volume_uuid, 0);
+    if (sodi->writer.b == NULL) {
         goto failGDGT;
     }
     sodi->diskHdr.descriptorOffset = sodi->diskHdr.overHead;
@@ -591,7 +594,7 @@ DiskInfo *StreamOptimized_Create(const char *fileName, off_t capacity) {
     if (!sodi->writer.zlibBuffer.data) {
         goto failDeflate;
     }
-    if (lseek(sodi->writer.fd, sodi->writer.curSP * VMDK_SECTOR_SIZE, SEEK_SET) == -1) {
+    if (sodi->writer.b->seek(sodi->writer.b->opaque, sodi->writer.curSP * VMDK_SECTOR_SIZE, SEEK_SET) == -1) {
         goto failAll;
     }
     return &sodi->hdr;
@@ -603,7 +606,8 @@ failDeflate:
 failGrainBuffer:
     free(sodi->writer.grainBuffer);
 failFD:
-    close(sodi->writer.fd);
+    sodi->writer.b->close(sodi->writer.b->opaque);
+    free(sodi->writer.b);
 failGDGT:
     free(sodi->writer.gtInfo.gd);
 failFileName:
@@ -622,23 +626,23 @@ typedef struct {
     uint8_t *grainBuffer;
     size_t readBufferSize;
     z_stream zstream;
-    int fd;
+    block *b;
 } SparseDiskInfo;
 
 typedef struct {
     off_t pos;
     uint8_t *buf;
     size_t len;
-    int fd;
+    block *b;
 } CoalescedPreader;
 
-static void CoalescedPreaderInit(CoalescedPreader *p, int fd) {
-    p->fd = fd;
+static void CoalescedPreaderInit(CoalescedPreader *p, block *b) {
+    p->b = b;
     p->len = 0;
 }
 
 static int CoalescedPreaderExec(CoalescedPreader *p) {
-    return p->len ? safePread(p->fd, p->buf, p->len, p->pos) ? 0 : -1 : 0;
+    return p->len ? safePread(p->b, p->buf, p->len, p->pos) ? 0 : -1 : 0;
 }
 
 static int CoalescedPreaderPread(CoalescedPreader *p, void *buf, size_t len, off_t pos) {
@@ -730,7 +734,7 @@ static ssize_t SparsePread(DiskInfo *self, void *buf, size_t len, off_t pos) {
                 uint32_t hdrlen;
                 uint32_t cmpSize;
 
-                if (!safePread(sdi->fd, sdi->readBuffer, VMDK_SECTOR_SIZE, sect * VMDK_SECTOR_SIZE)) {
+                if (!safePread(sdi->b, sdi->readBuffer, VMDK_SECTOR_SIZE, sect * VMDK_SECTOR_SIZE)) {
                     return -1;
                 }
                 if (sdi->diskHdr.flags & SPARSEFLAG_EMBEDDED_LBA) {
@@ -752,7 +756,7 @@ static ssize_t SparsePread(DiskInfo *self, void *buf, size_t len, off_t pos) {
                     size_t remainingLength =
                         (cmpSize + hdrlen - VMDK_SECTOR_SIZE + VMDK_SECTOR_SIZE - 1) & ~(VMDK_SECTOR_SIZE - 1);
 
-                    if (!safePread(sdi->fd, sdi->readBuffer + VMDK_SECTOR_SIZE, remainingLength,
+                    if (!safePread(sdi->b, sdi->readBuffer + VMDK_SECTOR_SIZE, remainingLength,
                                    (sect + 1) * VMDK_SECTOR_SIZE)) {
                         return -1;
                     }
@@ -772,7 +776,7 @@ static ssize_t SparsePread(DiskInfo *self, void *buf, size_t len, off_t pos) {
                 }
                 memcpy(buf8, sdi->grainBuffer + readSkip, readLen);
             } else {
-                if (!safePread(sdi->fd, buf8, readLen, sect * VMDK_SECTOR_SIZE + readSkip)) {
+                if (!safePread(sdi->b, buf8, readLen, sect * VMDK_SECTOR_SIZE + readSkip)) {
                     return -1;
                 }
             }
@@ -787,16 +791,16 @@ static ssize_t SparsePread(DiskInfo *self, void *buf, size_t len, off_t pos) {
 
 static int SparseClose(DiskInfo *self) {
     SparseDiskInfo *sdi = getSDI(self);
-    int fd;
 
     if (sdi->readBuffer) {
         inflateEnd(&sdi->zstream);
         free(sdi->readBuffer);
     }
     free(sdi->gtInfo.gd);
-    fd = sdi->fd;
+    int ret = sdi->b->close(sdi->b->opaque);
+    free(sdi->b);
     free(sdi);
-    return close(fd);
+    return ret;
 }
 
 static DiskInfoVMT sparseVMT = {
@@ -807,19 +811,19 @@ static DiskInfoVMT sparseVMT = {
     .abort = SparseClose,
 };
 
-DiskInfo *Sparse_Open(const char *fileName) {
+DiskInfo *Sparse_Open(__attribute__((unused)) const char *fileName) {
     SparseDiskInfo *sdi;
-    int fd;
+    block *b;
     SparseExtentHeaderOnDisk onDisk;
     uint32_t i;
     uint32_t *gt;
     CoalescedPreader cp = {0};
 
-    fd = open(fileName, O_RDONLY);
-    if (fd == -1) {
+    b = new_zbs_block(args.src_ip, args.src_volume_uuid, O_RDONLY);
+    if (b == NULL) {
         goto fail;
     }
-    if (read(fd, &onDisk, sizeof onDisk) != sizeof onDisk) {
+    if (b->read(b->opaque, &onDisk, sizeof onDisk) != sizeof onDisk) {
         goto failFd;
     }
     if (!checkSparseExtentHeader(&onDisk)) {
@@ -830,7 +834,7 @@ DiskInfo *Sparse_Open(const char *fileName) {
         goto failFd;
     }
     memset(sdi, 0, sizeof *sdi);
-    sdi->fd = fd;
+    sdi->b = b;
     if (!getSparseExtentHeader(&sdi->diskHdr, &onDisk)) {
         goto failSdi;
     }
@@ -852,11 +856,11 @@ DiskInfo *Sparse_Open(const char *fileName) {
             goto failRB;
         }
     }
-    if (!safePread(fd, sdi->gtInfo.gd, sdi->gtInfo.GDsectors * VMDK_SECTOR_SIZE,
+    if (!safePread(b, sdi->gtInfo.gd, sdi->gtInfo.GDsectors * VMDK_SECTOR_SIZE,
                    sdi->diskHdr.gdOffset * VMDK_SECTOR_SIZE)) {
         goto failDF;
     }
-    CoalescedPreaderInit(&cp, fd);
+    CoalescedPreaderInit(&cp, b);
     gt = sdi->gtInfo.gt;
     for (i = 0; i < sdi->gtInfo.GTs; i++) {
         uint32_t loc = __le32_to_cpu(sdi->gtInfo.gd[i]);
@@ -884,7 +888,8 @@ failGDGT:
 failSdi:
     free(sdi);
 failFd:
-    close(fd);
+    b->close(b->opaque);
+    free(b);
 fail:
     return NULL;
 }
