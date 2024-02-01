@@ -26,7 +26,7 @@
 #include "parse_cmd.h"
 
 static int copyData(DiskInfo *dst, off_t dstOffset, DiskInfo *src, off_t srcOffset, uint64_t length) {
-    char buf[65536];
+    char buf[2097152];
 
     while (length > 0) {
         size_t readLen;
