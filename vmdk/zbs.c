@@ -1,6 +1,8 @@
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <zbs/libzbs.h>
 
 #include "block.h"
@@ -10,6 +12,8 @@ typedef struct zbs {
     const char* zbs_volume_id;
     off_t seek;
     int flags;
+    atomic_int semaphore;
+    int write_ret;
 } zbs;
 
 zbs* zbs_open(const char* hosts, const char* volume_id, int flags) {
@@ -25,6 +29,7 @@ zbs* zbs_open(const char* hosts, const char* volume_id, int flags) {
     z->zbs_volume_id = volume_id;
     z->seek = 0;
     z->flags = flags;
+    z->semaphore = ATOMIC_VAR_INIT(0);
 
     return z;
 }
@@ -66,18 +71,35 @@ ssize_t zbs_read_volume(zbs* z, void* buf, size_t n_bytes) {
     return n_bytes;
 }
 
+void zbs_write_callback(int rc, zbs* z) {
+    atomic_fetch_sub(&z->semaphore, 1);
+
+    if (z->write_ret == 0) {
+        z->write_ret = rc;
+    }
+}
+
 ssize_t zbs_pwrite_volume(zbs* z, void* buf, size_t n_bytes, off_t offset) {
-    int write_ret;
+    struct timespec ts;
+
     if (z->flags & O_RDONLY) {
         printf("cannot write a read-only volume '%s'.\n", z->zbs_volume_id);
         return -1;
     }
 
-    write_ret = zbs_write(z->zbs_client, z->zbs_volume_id, buf, (uint32_t)n_bytes, (uint64_t)offset);
-    if (write_ret < 0) {
+    if (z->write_ret < 0) {
         printf("write volume '%s' at '%ld' error.\n", z->zbs_volume_id, offset);
-        return write_ret;
+        return z->write_ret;
     }
+
+    ts.tv_sec = 0;
+    ts.tv_nsec = 10000;
+    while (atomic_load(&z->semaphore) >= 32) {
+        nanosleep(&ts, NULL);
+    }
+
+    atomic_fetch_add(&z->semaphore, 1);
+    zbs_write_async(z->zbs_client, z->zbs_volume_id, buf, (uint32_t)n_bytes, (uint64_t)offset, zbs_write_callback, z);
 
     return n_bytes;
 }
