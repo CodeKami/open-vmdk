@@ -20,7 +20,7 @@ EXE := $(OUTPUTDIR)/vmdk-convert
 PREFIX ?= /usr
 
 CC := gcc
-CFLAGS := -W -Wall -O2 -std=c11 $(CFLAGS)
+CFLAGS := -W -Wall -O2 -g -std=c11 $(CFLAGS)
 LDFLAGS := -g -lz -lzbs $(LDFLAGS)
 
 OBJS := $(addprefix $(OUTPUTDIR)/, $(SRC:%.c=%.o))

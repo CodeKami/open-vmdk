@@ -1,3 +1,6 @@
+#define _GNU_SOURCE
+#define __USE_POSIX199309
+
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -14,7 +17,19 @@ typedef struct zbs {
     int flags;
     atomic_int semaphore;
     int write_ret;
+    zbs_diff_t diff;
+    zbs_diff_iter_t iter;
+    diff_range_t range;
 } zbs;
+
+diff_range_t _default_range() {
+    diff_range_t range = {
+        .start = -1,
+        .length = 0,
+    };
+
+    return range;
+}
 
 zbs* zbs_open(const char* hosts, const char* volume_id, int flags) {
     char* err = NULL;
@@ -23,6 +38,7 @@ zbs* zbs_open(const char* hosts, const char* volume_id, int flags) {
     if (!z->zbs_client) {
         printf("[%s] create zbs client with host '%s' error.\n", err, hosts);
         zbs_free_err_str(err);
+        free(z);
         return NULL;
     }
 
@@ -30,6 +46,15 @@ zbs* zbs_open(const char* hosts, const char* volume_id, int flags) {
     z->seek = 0;
     z->flags = flags;
     z->semaphore = ATOMIC_VAR_INIT(0);
+
+    if (zbs_get_written_area(z->zbs_client, volume_id, 0, 0, &z->diff) != 0) {
+        zbs_destroy(z->zbs_client);
+        free(z);
+        return NULL;
+    }
+
+    z->iter = zbs_diff_iter_begin(z->diff, 2ULL << 20);
+    z->range = _default_range();
 
     return z;
 }
@@ -42,6 +67,16 @@ off_t zbs_seek(zbs* z, off_t offset, int whence) {
         case SEEK_CUR:
             z->seek += offset;
             break;
+        case SEEK_DATA:
+            if (z->iter != zbs_diff_iter_end(z->diff)) {
+                z->range = zbs_diff_iter_deref(z->iter);
+                z->iter = zbs_diff_iter_next(z->iter);
+                return (off_t)z->range.start;
+            }
+            z->range = _default_range();
+            return -1;
+        case SEEK_HOLE:
+            return (off_t)(z->range.start + z->range.length);
         default:
             return -1;
     }
@@ -126,6 +161,7 @@ ssize_t zbs_get_size(zbs* z) {
 }
 
 int zbs_close(zbs* z) {
+    zbs_destroy_diff(z->diff);
     zbs_destroy(z->zbs_client);
     free(z);
 
